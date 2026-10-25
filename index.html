@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apuração e Projeção</title>
+<style>
+:root{--bg:#151412;--card:#1f1e1b;--line:#33312c;--fg:#f2f0ea;--mut:#a8a49a;--red:#f07a6e;--blue:#8ab8f0;--track:#2a2824;--bar:#0b0b0a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:980px;margin:0 auto;padding:20px 16px 60px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:20px;margin-bottom:16px}
+.k{color:var(--mut);font-size:12px;letter-spacing:.12em;text-transform:uppercase;font-weight:700}
+.big{font-size:52px;font-weight:800;letter-spacing:-.02em;line-height:1}
+.row{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+.mut{color:var(--mut)}
+.track{height:10px;background:var(--track);border-radius:9px;overflow:hidden;margin:8px 0}
+.track>div{height:100%}
+.split{display:flex;height:14px;border-radius:9px;overflow:hidden;margin:10px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:640px){.grid2{grid-template-columns:1fr}.big{font-size:40px}}
+.cand{font-weight:700}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+.chip{background:var(--track);border:1px solid var(--line);color:var(--fg);border-radius:999px;padding:6px 12px;cursor:pointer;font:inherit;font-size:14px}
+.chip.on{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+select,input{background:var(--track);color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:6px 10px;font:inherit}
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{padding:8px 6px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--mut);font-weight:600;font-size:12px;cursor:pointer}
+.note{font-size:13px;color:var(--mut)}
+.err{color:var(--red)}
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <div class="row"><span class="k">Apuração TSE · Presidente · <span id="turno"></span></span><span class="mut" id="hora">carregando…</span></div>
+    <div class="row" style="margin-top:10px"><span class="big" id="pst">–</span><span class="mut" id="escopo">das seções</span></div>
+    <div class="track"><div id="pstbar" style="width:0;background:var(--fg)"></div></div>
+    <div class="note" id="falta"></div>
+  </div>
+
+  <div class="grid2">
+    <div class="card">
+      <div class="k">Agora (votos válidos apurados)</div>
+      <div id="agora"></div>
+    </div>
+    <div class="card">
+      <div class="k">Projeção com 100% das seções</div>
+      <div id="proj"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="k">Filtro</div>
+    <div class="chips" id="regioes"></div>
+    <div class="row" style="justify-content:flex-start">
+      <label class="note">Estado <select id="uf"></select></label>
+      <label class="note">Completar faltante por
+        <select id="metodo">
+          <option value="e">eleitorado (mais preciso)</option>
+          <option value="s">nº de seções</option>
+        </select>
+      </label>
+      <label class="note"><input type="checkbox" id="auto" checked> atualizar a cada 60s</label>
+    </div>
+    <p class="note">Como a projeção funciona: em cada estado, o que falta apurar vota igual ao que já foi apurado ali (mesma divisão entre candidatos e mesmo comparecimento). Os 27 estados + exterior são somados. Estado sem nenhuma seção apurada entra com zero.</p>
+  </div>
+
+  <div class="card">
+    <div class="k" style="margin-bottom:8px">Estado por estado</div>
+    <div class="tablewrap"><table id="tab"></table></div>
+  </div>
+  <p class="note" id="status"></p>
+</main>
+<script>
+const BASE = 'https://resultados.tse.jus.br/oficial/ele2026';
+const ELEICAO = new URLSearchParams(location.search).get('e') || '6258'; // 6258 = 2º turno, 6257 = 1º turno
+const REG = {
+  'Norte':['ac','am','ap','pa','ro','rr','to'],
+  'Nordeste':['al','ba','ce','ma','pb','pe','pi','rn','se'],
+  'Centro-Oeste':['df','go','ms','mt'],
+  'Sudeste':['es','mg','rj','sp'],
+  'Sul':['pr','rs','sc'],
+  'Exterior':['zz']
+};
+const UFS = Object.values(REG).flat();
+const regiaoDe = Object.fromEntries(Object.entries(REG).flatMap(([r,l])=>l.map(u=>[u,r])));
+const COR = {'13':'var(--red)','22':'var(--blue)'};
+const OUTRAS = ['#c9a86a','#9ccf8f','#c79be0','#e0b38a'];
+
+const n = s => Number(String(s ?? '0').replace(',', '.')) || 0;
+const int = x => Math.round(x).toLocaleString('pt-BR');
+const pct = (x, d=2) => (x*100).toLocaleString('pt-BR',{minimumFractionDigits:d,maximumFractionDigits:d}) + '%';
+
+let dados = {}, cands = [], filtroReg = 'Brasil', filtroUf = '', ordem = 'pst', timer;
+
+function parse(j){
+  const lista = [];
+  for (const a of j.carg[0].agr) for (const p of a.par) for (const c of p.cand)
+    lista.push({n:c.n, nome:c.nmu, votos:n(c.vap)});
+  return {
+    cand: lista,
+    ts:n(j.s.ts), st:n(j.s.st),
+    te:n(j.e.te), est:n(j.e.est),
+    hora: j.ht, dia: j.dt, turno: j.t
+  };
+}
+
+async function carregar(){
+  document.getElementById('status').textContent = 'Buscando dados no TSE…';
+  const res = await Promise.allSettled(UFS.map(async uf => {
+    const r = await fetch(`${BASE}/${ELEICAO}/dados/${uf}/${uf}-c0001-e00${ELEICAO}-u.json`, {cache:'no-store'});
+    if (!r.ok) throw new Error(uf + ' HTTP ' + r.status);
+    return [uf, parse(await r.json())];
+  }));
+  const falhas = [];
+  for (const x of res) x.status === 'fulfilled' ? (dados[x.value[0]] = x.value[1]) : falhas.push(x.reason.message);
+  const algum = Object.values(dados)[0];
+  if (algum) {
+    // ordem fixa dos candidatos pelo número
+    const nums = new Map();
+    for (const d of Object.values(dados)) for (const c of d.cand) nums.set(c.n, c.nome);
+    cands = [...nums].map(([num,nome],i)=>({n:num,nome,cor:COR[num]||OUTRAS[i%OUTRAS.length]}));
+  }
+  document.getElementById('status').innerHTML = falhas.length
+    ? `<span class="err">Falhou: ${falhas.join(', ')}</span> (usando último dado bom)`
+    : `Fonte: resultados.tse.jus.br · eleição ${ELEICAO} · ${UFS.length} arquivos lidos às ${new Date().toLocaleTimeString('pt-BR')}`;
+  render();
+}
+
+function projetar(d, metodo){
+  if (!d || d.st === 0) return null;
+  const fator = metodo === 'e' ? (d.est ? d.te / d.est : d.ts / d.st) : d.ts / d.st;
+  return Object.fromEntries(d.cand.map(c => [c.n, c.votos * fator]));
+}
+
+function somar(ufs, metodo){
+  const agora = {}, proj = {};
+  let ts=0, st=0, te=0, est=0, semDados=[], hora='';
+  for (const uf of ufs){
+    const d = dados[uf]; if (!d) { semDados.push(uf); continue; }
+    ts+=d.ts; st+=d.st; te+=d.te; est+=d.est;
+    if (d.hora > hora) hora = d.hora;
+    const p = projetar(d, metodo);
+    if (!p) semDados.push(uf);
+    for (const c of d.cand){
+      agora[c.n] = (agora[c.n]||0) + c.votos;
+      proj[c.n] = (proj[c.n]||0) + (p ? p[c.n] : 0);
+    }
+  }
+  return {agora, proj, ts, st, te, est, semDados, hora};
+}
+
+function blocoVotos(v, rotuloFaltam){
+  const tot = cands.reduce((s,c)=>s+(v[c.n]||0),0);
+  if (!tot) return '<p class="mut">Sem votos ainda.</p>';
+  const ord = [...cands].sort((a,b)=>(v[b.n]||0)-(v[a.n]||0));
+  const [a,b] = ord;
+  let h = '<div class="split">' + ord.map(c=>`<div style="width:${(v[c.n]||0)/tot*100}%;background:${c.cor}"></div>`).join('') + '</div>';
+  h += ord.map(c=>`<div class="row"><span class="cand" style="color:${c.cor}">${c.nome} ${pct((v[c.n]||0)/tot)}</span><span class="mut">${int(v[c.n]||0)} votos</span></div>`).join('');
+  if (b) h += `<p class="note" style="margin-bottom:0">${a.nome} na frente por <b style="color:var(--fg)">${int((v[a.n]||0)-(v[b.n]||0))}</b> votos (${pct(((v[a.n]||0)-(v[b.n]||0))/tot)})${rotuloFaltam||''}</p>`;
+  return h;
+}
+
+function render(){
+  if (!cands.length) return;
+  const metodo = document.getElementById('metodo').value;
+  const ufs = filtroUf ? [filtroUf] : (filtroReg === 'Brasil' ? UFS : REG[filtroReg]);
+  const s = somar(ufs, metodo);
+  const ex = Object.values(dados)[0];
+  document.getElementById('turno').textContent = ex.turno + 'º turno';
+  document.getElementById('hora').textContent = `TSE ${ex.dia} ${s.hora}`;
+  const escopo = filtroUf ? filtroUf.toUpperCase() : (filtroReg === 'Brasil' ? 'do país' : filtroReg);
+  document.getElementById('pst').textContent = pct(s.ts ? s.st/s.ts : 0);
+  document.getElementById('escopo').textContent = 'das seções · ' + escopo;
+  document.getElementById('pstbar').style.width = (s.ts ? s.st/s.ts*100 : 0) + '%';
+
+  // fatia do que falta, por região (sempre Brasil inteiro)
+  const faltaReg = Object.entries(REG).map(([r,l])=>[r,l.reduce((x,u)=>x+(dados[u]?dados[u].ts-dados[u].st:0),0)]);
+  const faltaTot = faltaReg.reduce((x,[,v])=>x+v,0);
+  const fechados = UFS.filter(u=>u!=='zz' && dados[u] && dados[u].st===dados[u].ts).length;
+  const maior = faltaReg.sort((a,b)=>b[1]-a[1])[0];
+  document.getElementById('falta').textContent = `Faltam ${int(s.ts-s.st)} seções aqui (${int(faltaTot)} no país); ${fechados} de 27 estados já fecharam.` +
+    (faltaTot ? ` A maior parte do que falta no país está no ${maior[0]} (${pct(maior[1]/faltaTot,0)}).` : '');
+
+  document.getElementById('agora').innerHTML = blocoVotos(s.agora);
+  const extra = s.semDados.length ? ` · sem dados para projetar: ${s.semDados.map(u=>u.toUpperCase()).join(', ')}` : '';
+  document.getElementById('proj').innerHTML = blocoVotos(s.proj) + `<p class="note">Base: ${metodo==='e' ? int(s.te)+' eleitores' : int(s.ts)+' seções'} em 100%${extra}</p>`;
+
+  tabela(ufs, metodo);
+}
+
+function tabela(ufs, metodo){
+  const [c1, c2] = cands;
+  const linhas = ufs.filter(u=>dados[u]).map(uf=>{
+    const d = dados[uf], p = projetar(d, metodo);
+    const tot = d.cand.reduce((x,c)=>x+c.votos,0);
+    const v = Object.fromEntries(d.cand.map(c=>[c.n,c.votos]));
+    const ptot = p ? Object.values(p).reduce((a,b)=>a+b,0) : 0;
+    return {uf, reg:regiaoDe[uf], pst:d.ts?d.st/d.ts:0, faltam:d.ts-d.st,
+      a: tot ? v[c1.n]/tot : 0, b: c2 && tot ? v[c2.n]/tot : 0,
+      ganhoA: p ? p[c1.n]-v[c1.n] : 0, ganhoB: p && c2 ? p[c2.n]-v[c2.n] : 0,
+      margem: p && c2 ? p[c1.n]-p[c2.n] : 0, ptot};
+  });
+  const keys = {uf:'uf', pst:'pst', faltam:'faltam', a:'a', b:'b', margem:'margem'};
+  linhas.sort((x,y)=> ordem==='uf' ? x.uf.localeCompare(y.uf) : (ordem==='pst' ? x.pst-y.pst : y[keys[ordem]]-x[keys[ordem]]));
+  const nome = c => c ? c.nome.split(' ').pop() : '';
+  let h = `<tr><th data-o="uf">UF</th><th data-o="pst">% apurado</th><th data-o="faltam">Seções faltando</th>
+    <th data-o="a" style="color:${c1.cor}">${nome(c1)}</th>${c2?`<th data-o="b" style="color:${c2.cor}">${nome(c2)}</th>`:''}
+    <th>+ votos ${nome(c1)} projetados</th>${c2?`<th>+ votos ${nome(c2)} projetados</th>`:''}
+    <th data-o="margem">Margem final projetada</th></tr>`;
+  for (const l of linhas){
+    const lid = l.margem >= 0 ? c1 : c2;
+    h += `<tr><td><b>${l.uf.toUpperCase()}</b> <span class="mut">${l.reg}</span></td><td>${pct(l.pst,1)}</td><td>${int(l.faltam)}</td>
+      <td style="color:${c1.cor}">${pct(l.a,1)}</td>${c2?`<td style="color:${c2.cor}">${pct(l.b,1)}</td>`:''}
+      <td>${int(l.ganhoA)}</td>${c2?`<td>${int(l.ganhoB)}</td>`:''}
+      <td style="color:${lid?lid.cor:'inherit'}">${l.ptot ? nome(lid)+' +'+int(Math.abs(l.margem)) : '–'}</td></tr>`;
+  }
+  const t = document.getElementById('tab');
+  t.innerHTML = h;
+  t.querySelectorAll('th[data-o]').forEach(th=>th.onclick=()=>{ordem=th.dataset.o; render();});
+}
+
+// filtros
+const chips = document.getElementById('regioes');
+['Brasil', ...Object.keys(REG)].forEach(r=>{
+  const b = document.createElement('button'); b.className='chip'+(r==='Brasil'?' on':''); b.textContent=r;
+  b.onclick=()=>{filtroReg=r; filtroUf=''; sel.value=''; chips.querySelectorAll('.chip').forEach(x=>x.classList.toggle('on',x===b)); render();};
+  chips.appendChild(b);
+});
+const sel = document.getElementById('uf');
+sel.innerHTML = '<option value="">todos do filtro</option>' + [...UFS].sort().map(u=>`<option value="${u}">${u==='zz'?'Exterior':u.toUpperCase()}</option>`).join('');
+sel.onchange = ()=>{filtroUf = sel.value; render();};
+document.getElementById('metodo').onchange = render;
+function agendar(){ clearInterval(timer); if (document.getElementById('auto').checked) timer = setInterval(carregar, 60000); }
+document.getElementById('auto').onchange = agendar;
+
+carregar(); agendar();
+</script>
+</body>
+</html>
