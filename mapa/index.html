@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mapa por Seção</title>
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/deck.gl@9.0.38/dist.min.js"></script>
+<style>
+:root{--bg:#151412;--card:#1f1e1bf0;--line:#33312c;--fg:#f2f0ea;--mut:#a8a49a;--red:#f07a6e;--blue:#8ab8f0}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+#map{position:fixed;inset:0}
+.painel{position:fixed;top:12px;left:12px;width:min(340px,calc(100vw - 24px));background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;z-index:2;max-height:calc(100vh - 24px);overflow:auto}
+.k{color:var(--mut);font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:700}
+h1{font-size:18px;margin:4px 0 8px}
+.row{display:flex;justify-content:space-between;gap:8px;align-items:baseline}
+.split{display:flex;height:10px;border-radius:6px;overflow:hidden;margin:6px 0}
+.mut{color:var(--mut)}.note{font-size:12px;color:var(--mut)}
+.red{color:var(--red)}.blue{color:var(--blue)}
+select,button{background:#2a2824;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font:inherit;font-size:13px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+.chip.on{background:var(--fg);color:var(--bg)}
+#tip{position:fixed;pointer-events:none;z-index:3;background:#0d0d0cf2;border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:13px;display:none;max-width:280px}
+#carregando{position:fixed;inset:0;display:grid;place-items:center;z-index:4;background:var(--bg);color:var(--mut)}
+details summary{cursor:pointer;color:var(--mut);font-size:12px;margin-top:8px}
+@media(max-width:600px){.painel{top:auto;bottom:12px;max-height:45vh}}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="carregando">Carregando seções…</div>
+<div class="painel">
+  <div class="k" id="titulo">Presidente · por seção</div>
+  <h1 id="h1">Quem venceu em cada seção</h1>
+  <div id="resumo"></div>
+  <div class="chips" id="modo">
+    <button class="chip on" data-m="margem">Cor pela margem</button>
+    <button class="chip" data-m="vencedor">Só vencedor</button>
+  </div>
+  <div class="row" style="justify-content:flex-start;gap:8px">
+    <select id="uf"><option value="">Brasil inteiro</option></select>
+    <select id="so">
+      <option value="">todas as seções</option>
+      <option value="l">só onde Lula venceu</option>
+      <option value="b">só onde Bolsonaro venceu</option>
+    </select>
+  </div>
+  <details><summary>Como ler</summary>
+    <p class="note">Cada ponto é uma seção eleitoral, no endereço do seu local de votação (dados oficiais do TSE). Seções do mesmo prédio ficam num cachinho em volta do endereço. <span class="red">Vermelho</span> = Lula teve mais votos que o adversário naquela seção; <span class="blue">azul</span> = Bolsonaro teve mais. Em "Cor pela margem", quanto mais forte a cor, maior a vantagem. Toque ou passe o mouse num ponto para ver os números.</p>
+    <p class="note" id="fonte"></p>
+  </details>
+</div>
+<div id="tip"></div>
+<script>
+const UF_BBOX = {ac:[-74,-11.2,-66.6,-7.1],al:[-38.3,-10.5,-35.1,-8.8],am:[-73.8,-9.9,-56.1,2.3],ap:[-54.9,-1.3,-49.8,4.5],ba:[-46.7,-18.4,-37.3,-8.5],ce:[-41.5,-7.9,-37.2,-2.7],df:[-48.3,-16.1,-47.3,-15.5],es:[-41.9,-21.3,-39.6,-17.9],go:[-53.3,-19.5,-45.9,-12.4],ma:[-48.8,-10.3,-41.8,-1],mg:[-51.1,-22.9,-39.8,-14.2],ms:[-58.2,-24.1,-50.9,-17.2],mt:[-61.7,-18.1,-50.2,-7.3],pa:[-58.9,-9.9,-46,2.6],pb:[-38.8,-8.3,-34.7,-6],pe:[-41.4,-9.5,-34.8,-7.3],pi:[-45.99,-10.9,-40.3,-2.7],pr:[-54.7,-26.8,-48,-22.5],rj:[-44.9,-23.4,-40.9,-20.7],rn:[-38.6,-6.99,-34.9,-4.8],ro:[-66.9,-13.7,-59.7,-7.9],rr:[-64.9,-1.6,-58.8,5.3],rs:[-57.7,-33.8,-49.6,-27],sc:[-53.9,-29.4,-48.3,-25.9],se:[-38.3,-11.6,-36.4,-9.5],sp:[-53.2,-25.4,-44.1,-19.7],to:[-50.8,-13.5,-45.6,-5.1]};
+const RED = [240,122,110], BLUE = [138,184,240], GRAY = [150,150,150];
+const fmt = n => n.toLocaleString('pt-BR');
+const pc = x => (x*100).toLocaleString('pt-BR',{maximumFractionDigits:1}) + '%';
+let modo = 'margem', so = '', N = 0, buf, locais, meta, overlay;
+
+function cor(l, b){
+  if (l === b) return [...GRAY, 200];
+  const base = l > b ? RED : BLUE;
+  if (modo === 'vencedor') return [...base, 230];
+  const m = Math.abs(l - b) / Math.max(l + b, 1);          // 0..1
+  const t = Math.min(1, 0.25 + m * 1.5);                   // margem 50 p.p. ou mais = cor cheia
+  return [...base.map(c => Math.round(60 + (c - 60) * t)), Math.round(120 + 135 * t)];
+}
+
+function camada(){
+  const dv = new DataView(buf);
+  const lon = i => dv.getFloat32(i*20, true), lat = i => dv.getFloat32(i*20+4, true);
+  const L = i => dv.getUint16(i*20+8, true), B = i => dv.getUint16(i*20+10, true);
+  return new deck.ScatterplotLayer({
+    id: 'secoes', data: {length: N}, pickable: true,
+    radiusUnits: 'meters', getRadius: 6, radiusMinPixels: 1.2, radiusMaxPixels: 9,
+    getPosition: (_, {index}) => [lon(index), lat(index)],
+    getFillColor: (_, {index}) => {
+      const l = L(index), b = B(index);
+      if ((so === 'l' && !(l > b)) || (so === 'b' && !(b > l))) return [0,0,0,0];
+      return cor(l, b);
+    },
+    updateTriggers: {getFillColor: [modo, so]},
+    onHover: info => tip(info, dv)
+  });
+}
+
+function tip(info, dv){
+  const el = document.getElementById('tip');
+  if (info.index < 0) { el.style.display = 'none'; return; }
+  const i = info.index, o = i*20;
+  const l = dv.getUint16(o+8,true), b = dv.getUint16(o+10,true), loc = locais[dv.getUint32(o+12,true)];
+  const z = dv.getUint16(o+16,true), s = dv.getUint16(o+18,true), t = Math.max(l + b, 1);
+  el.innerHTML = `<b>${loc[0]}</b><br><span class="mut">${loc[1]} · ${loc[2]} · zona ${z} · seção ${s}</span><br>
+    <span class="red">Lula ${fmt(l)} (${pc(l/t)})</span> × <span class="blue">Bolsonaro ${fmt(b)} (${pc(b/t)})</span><br>
+    <span class="mut">${l===b?'empate':(l>b?'Lula':'Bolsonaro')+' +'+fmt(Math.abs(l-b))+' votos'}</span>`;
+  el.style.display = 'block';
+  el.style.left = Math.min(info.x + 14, innerWidth - 290) + 'px';
+  el.style.top = Math.min(info.y + 14, innerHeight - 110) + 'px';
+}
+
+function resumo(){
+  const dv = new DataView(buf);
+  let sl = 0, sb = 0, se = 0, vl = 0, vb = 0;
+  for (let i = 0; i < N; i++){
+    const l = dv.getUint16(i*20+8,true), b = dv.getUint16(i*20+10,true);
+    vl += l; vb += b; l > b ? sl++ : b > l ? sb++ : se++;
+  }
+  const t = vl + vb;
+  document.getElementById('resumo').innerHTML = `
+    <div class="split"><div style="width:${sl/N*100}%;background:var(--red)"></div><div style="width:${se/N*100}%;background:#888"></div><div style="width:${sb/N*100}%;background:var(--blue)"></div></div>
+    <div class="row"><span class="red"><b>${fmt(sl)}</b> seções Lula</span><span class="blue"><b>${fmt(sb)}</b> seções Bolsonaro</span></div>
+    <div class="note">${fmt(se)} empatadas · ${fmt(N)} seções no mapa</div>
+    <div class="note" style="margin-top:4px">Votos nessas seções: <span class="red">Lula ${pc(vl/t)}</span> × <span class="blue">Bolsonaro ${pc(vb/t)}</span></div>`;
+}
+
+async function main(){
+  const [b, l, m] = await Promise.all([
+    fetch('secoes.bin').then(r => r.arrayBuffer()),
+    fetch('locais.json').then(r => r.json()),
+    fetch('meta.json').then(r => r.json())
+  ]);
+  buf = b; locais = l; meta = m; N = buf.byteLength / 20;
+  document.getElementById('titulo').textContent = `Presidente · ${meta.turno}º turno · por seção`;
+  document.getElementById('fonte').textContent = `Fonte: TSE (${meta.fonte}). ${meta.obs || ''}`;
+  resumo();
+
+  const map = new maplibregl.Map({
+    container: 'map',
+    style: 'https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json',
+    bounds: [[-74, -34], [-34.5, 5.5]], fitBoundsOptions: {padding: 20}, attributionControl: {compact: true}
+  });
+  map.addControl(new maplibregl.NavigationControl({showCompass: false}), 'top-right');
+  overlay = new deck.MapboxOverlay({layers: [camada()]});
+  map.addControl(overlay);
+  map.on('load', () => document.getElementById('carregando').remove());
+
+  const sel = document.getElementById('uf');
+  sel.innerHTML += Object.keys(UF_BBOX).map(u => `<option value="${u}">${u.toUpperCase()}</option>`).join('');
+  sel.onchange = () => {
+    const bb = sel.value ? UF_BBOX[sel.value] : [-74, -34, -34.5, 5.5];
+    map.fitBounds([[bb[0], bb[1]], [bb[2], bb[3]]], {padding: 30});
+  };
+  document.getElementById('so').onchange = e => { so = e.target.value; overlay.setProps({layers: [camada()]}); };
+  document.querySelectorAll('#modo .chip').forEach(btn => btn.onclick = () => {
+    modo = btn.dataset.m;
+    document.querySelectorAll('#modo .chip').forEach(x => x.classList.toggle('on', x === btn));
+    overlay.setProps({layers: [camada()]});
+  });
+}
+main().catch(e => { document.getElementById('carregando').textContent = 'Erro ao carregar: ' + e.message; });
+</script>
+</body>
+</html>
